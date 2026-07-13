@@ -102,6 +102,10 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
         if os.path.exists(temp_script_path):
             os.remove(temp_script_path)
 
+# --- get health
+@app.get("/health")
+async def health_check():
+    return {"status": "awake"}
 
 # --- 2. REST API: VALIDATION SUBMISSION ---
 @app.post("/api/submit")
