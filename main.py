@@ -107,13 +107,9 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
 async def health_check():
     return {"status": "awake"}
 
-# --- 2. REST API: VALIDATION SUBMISSION ---
+# --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
-    """
-    Handles background test matrix execution via standard HTTP POST.
-    Short-circuits and returns immediately upon the first failure.
-    """
     code = payload.code
     test_cases = payload.tests
 
@@ -121,19 +117,19 @@ async def submit_code_http(payload: SubmitPayload):
         test_type = test.get("type")
         test_id = test.get("id")
 
-        # 🚨 NEW SYSTEMIC SAFEGUARD
         valid_types = ["unit_test", "io_match", "syntax_check"]
         if test_type not in valid_types:
             return {
                 "status": "error",
                 "id": test_id,
-                "error_message": f"SYSTEM ERROR: Unrecognized test type '{test_type}' in curriculum data.",
-                "feedback": "Please contact support. The test case for this lesson is misconfigured."
+                "error_message": f"SYSTEM ERROR: Unrecognized test type '{test_type}'.",
+                "feedback": "Please contact support."
             }
         
         execution_code = code
         if test_type == "unit_test":
-            execution_code += "\n\n# --- HIDDEN TESTS ---\n" + test.get("hidden_code", "")
+            # FIXED: Looks for "test_code" to match your JSON payload
+            execution_code += "\n\n# --- HIDDEN TESTS ---\n" + test.get("test_code", "")
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_script:
             temp_script.write(execution_code)
@@ -147,26 +143,22 @@ async def submit_code_http(payload: SubmitPayload):
                 stderr=asyncio.subprocess.PIPE
             )
 
-            # Inject Inputs if it's an I/O Match
-            if test_type == "io_match":
-                inputs = test.get("injected_inputs", [])
-                if inputs and process.stdin:
-                    input_string = "\n".join(inputs) + "\n"
-                    process.stdin.write(input_string.encode('utf-8'))
-                    await process.stdin.drain()
+            # FIXED: Inject inputs for ANY test type if they are provided
+            inputs = test.get("injected_inputs", [])
+            if inputs and process.stdin:
+                input_string = "\n".join(inputs) + "\n"
+                process.stdin.write(input_string.encode('utf-8'))
+                await process.stdin.drain()
             
-            # Close stdin to prevent hanging on input()
             if process.stdin:
                 process.stdin.close()
 
-            # 5 second strict timeout for validation tests
             stdout_data, stderr_data = await asyncio.wait_for(process.communicate(), timeout=5.0)
             
             stdout_str = stdout_data.decode('utf-8').strip()
             stderr_str = stderr_data.decode('utf-8').strip()
             return_code = process.returncode
 
-            # Evaluate Pass/Fail Logic
             status = "failed"
             if return_code != 0:
                 status = "error"
@@ -180,7 +172,6 @@ async def submit_code_http(payload: SubmitPayload):
                 elif match_type == "contains" and expected in stdout_str:
                     status = "passed"
 
-            # 🚨 SHORT-CIRCUIT: Return instantly on first failure
             if status in ["failed", "error"]:
                 return {
                     "status": status,
@@ -193,7 +184,7 @@ async def submit_code_http(payload: SubmitPayload):
             return {
                 "status": "error",
                 "id": test_id,
-                "error_message": "Execution timed out (infinite loop or awaiting unexpected input).",
+                "error_message": "Execution timed out.",
                 "feedback": test.get("feedback_message")
             }
         finally:
@@ -204,10 +195,8 @@ async def submit_code_http(payload: SubmitPayload):
             except:
                 pass
 
-    # If the loop completes without returning, all tests passed!
     return {"status": "passed"}
-
-
+    
 # --- 3. WEBSOCKET ENDPOINT: INTERACTIVE CONSOLE ---
 @app.websocket("/ws/execute")
 async def websocket_endpoint(websocket: WebSocket):
