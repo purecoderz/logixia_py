@@ -121,10 +121,9 @@ async def health_check():
 # ==========================================
 def enforce_socratic_guardrail(text: str) -> str:
     """
-    Scans the AI response for markdown code blocks. If the Llama model hallucinated 
+    Scans the response for raw code blocks. If the Llama model hallucinated 
     or leaked a code block, this strips it out and injects a helpful pivot.
     """
-    # Regex to match raw markdown code blocks (```python ... ```)
     code_block_regex = r"```[a-zA-Z]*\n[\s\S]*?\n```"
     
     if re.search(code_block_regex, text):
@@ -168,6 +167,7 @@ async def ask_coach(payload: CoachRequest):
         "4. ALWAYS turn their explicit question back into a targeted Socratic counter-question that forces them to discover their own logical mistakes or architectural improvements."
     )
 
+    # Format the tests into a readable JSON block for the LLM context
     formatted_tests = json.dumps(payload.tests, indent=2)
 
     messages = [
@@ -184,8 +184,12 @@ async def ask_coach(payload: CoachRequest):
         }
     ]
     
-    # Append the running chat history from the React frontend
-    messages.extend(payload.chatHistory)
+    # Safely unpack history, passing only standard roles and content values to Groq
+    for msg in payload.chatHistory:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role and content:
+            messages.append({"role": str(role), "content": str(content)})
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -206,7 +210,7 @@ async def ask_coach(payload: CoachRequest):
     data = response.json()
     raw_content = data["choices"][0]["message"]["content"]
     
-    # Run the raw completion through the Socratic check
+    # Pass the raw completion through the Socratic check
     final_content = enforce_socratic_guardrail(raw_content)
     
     return {"guidance": final_content}
