@@ -166,7 +166,7 @@ async def ask_coach(payload: CoachRequest):
 
     data = response.json()
     return {"guidance": data["choices"][0]["message"]["content"]}
-    
+
 async def ask_coach(payload: CoachRequest):
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
