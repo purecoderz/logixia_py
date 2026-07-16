@@ -116,11 +116,15 @@ async def health_check():
     return {"status": "awake"}
 
 # --- 4. REST API: SOCRATIC AI COACH ---
+# ==========================================
+# HARD BACKEND REGEX GUARDRAIL
+# ==========================================
 def enforce_socratic_guardrail(text: str) -> str:
     """
-    Scans the AI response for raw code blocks. If the Llama model hallucinated 
+    Scans the AI response for markdown code blocks. If the Llama model hallucinated 
     or leaked a code block, this strips it out and injects a helpful pivot.
     """
+    # Regex to match raw markdown code blocks (```python ... ```)
     code_block_regex = r"```[a-zA-Z]*\n[\s\S]*?\n```"
     
     if re.search(code_block_regex, text):
@@ -180,6 +184,7 @@ async def ask_coach(payload: CoachRequest):
         }
     ]
     
+    # Append the running chat history from the React frontend
     messages.extend(payload.chatHistory)
 
     async with httpx.AsyncClient() as client:
@@ -188,7 +193,7 @@ async def ask_coach(payload: CoachRequest):
             headers={"Authorization": f"Bearer {groq_api_key}"},
             json={
                 "model": "llama-3.3-70b-versatile",
-                "temperature": 0.2, # Lower temperature for more deterministic rule adherence
+                "temperature": 0.2,
                 "messages": messages
             },
             timeout=30.0
@@ -201,11 +206,10 @@ async def ask_coach(payload: CoachRequest):
     data = response.json()
     raw_content = data["choices"][0]["message"]["content"]
     
-    # Process the raw output through the hard guardrail filter
+    # Run the raw completion through the Socratic check
     final_content = enforce_socratic_guardrail(raw_content)
     
     return {"guidance": final_content}
-    
 # --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
