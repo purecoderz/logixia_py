@@ -119,33 +119,54 @@ async def health_check():
 # ==========================================
 # HARD BACKEND REGEX GUARDRAIL
 # ==========================================
-def enforce_socratic_guardrail(text: str) -> str:
-    """
-    Scans the response for raw code blocks. If the Llama model hallucinated 
-    or leaked a code block, this strips it out and injects a helpful pivot.
-    """
-    code_block_regex = r"```[a-zA-Z]*\n[\s\S]*?\n```"
-    
-    if re.search(code_block_regex, text):
-        # Clean the text of the code blocks
-        sanitized_text = re.sub(code_block_regex, "", text).strip()
-        
-        # If stripping the code left the response completely empty
-        if not sanitized_text:
-            return (
-                "I was about to write the code for you, but that would skip the best part of learning! "
-                "Let's look at your control structure instead. What do you think your logic is missing?"
-            )
-        
-        return (
-            f"{sanitized_text}\n\n"
-            "*(Coach Note: I intercepted and removed a code snippet I almost generated. "
-            "Let's stick to the logic! Tell me what you think your next step is in plain English.)*"
-        )
-        
-    return text
-
+# --- 4. REST API: SOCRATIC AI COACH ---
 @app.post("/api/coach")
+async def ask_coach(payload: CoachRequest):
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on the server.")
+
+    # Strict Socratic instructions
+    system_prompt = (
+        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n"
+        "CRITICAL MANDATE: You are strictly forbidden from writing code, fixing the user's syntax, or providing solutions.\n"
+        "Guidelines:\n"
+        "1. Analyze the user's code against the task instructions.\n"
+        "2. If there is an error, point them to the exact line or section to inspect.\n"
+        "3. Turn their question back into a targeted Socratic question that helps them spot their logical mistake."
+    )
+
+    # Build the messages payload chronologically
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user", 
+            "content": f"Context for this session:\nTask Instructions:\n{payload.taskInstructions}\n\nMy current code:\n{payload.userCode}\n\nPlease help me step-by-step."
+        }
+    ]
+    
+    # Append the running chat history from the React frontend
+    messages.extend(payload.chatHistory)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_api_key}"},
+            json={
+                "model": "llama-3.3-70b-specdec", # Groq's fast, free reasoning model
+                "temperature": 0.3,
+                "messages": messages
+            },
+            timeout=30.0
+        )
+    
+    if response.status_code != 200:
+        error_details = response.json().get("error", {}).get("message", "Unknown error from Groq")
+        raise HTTPException(status_code=response.status_code, detail=f"Groq API error: {error_details}")
+
+    data = response.json()
+    return {"guidance": data["choices"][0]["message"]["content"]}
+    
 async def ask_coach(payload: CoachRequest):
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
