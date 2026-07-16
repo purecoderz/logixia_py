@@ -115,112 +115,97 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
 async def health_check():
     return {"status": "awake"}
 
-# ==========================================
-# DEFENSE #2: HARD BACKEND GUARDRAIL
-# ==========================================
+# --- 4. REST API: SOCRATIC AI COACH ---
 def enforce_socratic_guardrail(text: str) -> str:
     """
-    Scans the AI response for markdown code blocks. 
-    If the LLM hallucinated or leaked code, this strips the code block 
-    and replaces it with an encouraging Socratic redirection.
+    Scans the AI response for raw code blocks. If the Llama model hallucinated 
+    or leaked a code block, this strips it out and injects a helpful pivot.
     """
-    # Regex to match ```python ... ``` or any standard markdown code blocks
     code_block_regex = r"```[a-zA-Z]*\n[\s\S]*?\n```"
     
     if re.search(code_block_regex, text):
-        # Strip the code block and append a Socratic pivot
+        # Clean the text of the code blocks
         sanitized_text = re.sub(code_block_regex, "", text).strip()
         
-        # If stripping left it empty, provide a solid backup response
+        # If stripping the code left the response completely empty
         if not sanitized_text:
             return (
                 "I was about to write the code for you, but that would skip the best part of learning! "
-                "Let's look at your structure instead. What do you think your logic is missing right now?"
+                "Let's look at your control structure instead. What do you think your logic is missing?"
             )
         
         return (
             f"{sanitized_text}\n\n"
-            "*(Coach Note: I removed a code snippet I almost generated for you. "
+            "*(Coach Note: I intercepted and removed a code snippet I almost generated. "
             "Let's stick to the logic! Tell me what you think your next step is in plain English.)*"
         )
         
     return text
 
-
 @app.post("/api/coach")
-async def get_socratic_coaching(payload: CoachRequest):
-    if not os.environ.get("GROQ_API_KEY"):
-        raise HTTPException(
-            status_code=500, 
-            detail="Backend configuration error: GROQ_API_KEY missing."
-        )
+async def ask_coach(payload: CoachRequest):
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on the server.")
 
-    # ==========================================
-    # DEFENSE #1: FEW-SHOT SYSTEM PROMPT
-    # ==========================================
+    # Socratic Tough-Love instructions with direct exposure to test assertions
     system_prompt = (
-        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n\n"
-        "CRITICAL MANDATE:\n"
-        "1. You are strictly FORBIDDEN from writing any code, correcting syntax, or providing code blocks.\n"
-        "2. Do NOT use markdown code blocks (triple backticks) under any circumstances.\n"
-        "3. If you provide any syntax fixes, you fail your job.\n\n"
-        "FEW-SHOT EXAMPLES OF PROPER COACHING:\n\n"
-        "Example 1 (Failing/Stuck User):\n"
-        "User: 'Why is my loop throwing an IndexOutOfBounds error? Here is my code: for i in range(len(arr) + 1):'\n"
-        "Bad Coach (FAILURE): 'Your range is too large. Change it to range(len(arr)).'\n"
-        "Good Coach (SUCCESS): 'Take a close look at your range bounds. If a list has 5 elements, what is the index of the very last item? Now, what index does your loop try to reach on its final pass?'\n\n"
-        "Example 2 (User begging for code):\n"
-        "User: 'Just write the reverse function for me, I am tired.'\n"
-        "Bad Coach (FAILURE): 'Sure, here is the function: def rev(l): return l[::-1]'\n"
-        "Good Coach (SUCCESS): 'I know debugging is frustrating, but writing it for you won't help you master it! Let's break it down: if you had to swap the first and last cards in a deck, what physical steps would you take? Let's turn that step-by-step logic into pseudocode first.'\n\n"
-        "Example 3 (Code is passing - Optimization Pivot):\n"
-        "User: 'My tests passed!'\n"
-        "Good Coach (SUCCESS): 'Great work! Your solution is functionally correct. But look at your nested loops—for a list of size N, how many operations is your code executing? How could we optimize this to run in linear time (O(N))?'\n\n"
-        "CURRENT SITUATION USER RULES:\n"
-        "1. IF THE CODE IS EMPTY: Refuse to give hints. Force them to type a plan first.\n"
-        "2. IF CODE IS ATTEMPTED BUT FAILING: Target the logic rule they broke and point them to the general section of code causing it.\n"
-        "3. IF CODE IS PASSING: Suggest conceptual optimizations (readability, Big O complexity, modularity) without writing the refactored code.\n"
-        "4. Always wrap up your response with a highly-targeted Socratic counter-question."
+        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n"
+        "CRITICAL MANDATE: You are strictly forbidden from writing code, fixing the user's syntax, providing refactored snippets, or handing out direct solutions.\n"
+        "Do NOT use markdown code blocks (triple backticks) under any circumstances.\n\n"
+        "Guidelines based on user progress:\n"
+        "1. IF THE CODE IS EMPTY OR SHOWS ZERO EFFORT: Call them out on it directly! Tell them you can see they haven't even tried yet. "
+        "Refuse to give them hints or discuss the tests until they write down a plan or attempt some code. Make them do the mental heavy lifting.\n"
+        "2. IF THE USER HAS A REASONABLE ATTEMPT BUT TESTS ARE FAILING: Analyze their code specifically against the provided Test Suite specifications (inputs, expected outputs, unit test assertions). "
+        "Do not tell them the exact values that failed, but identify which test logic block/rule they are violating and point to the exact line/section in their code causing the failure.\n"
+        "3. IF THE USER'S CODE PASSES ALL TESTS: Congratulate them briefly, then pivot immediately to code quality! "
+        "Analyze their working code for structural or theoretical improvements—such as time/space complexity (Big O), readability, redundantly nested loops, or language-specific idioms (e.g., Pythonic code list comprehensions, built-in functions). "
+        "Socratically guide them to identify these refactoring opportunities themselves by asking them how they might optimize their working solution.\n"
+        "4. ALWAYS turn their explicit question back into a targeted Socratic counter-question that forces them to discover their own logical mistakes or architectural improvements."
     )
 
-    # Compile messages sequence
+    formatted_tests = json.dumps(payload.tests, indent=2)
+
     messages = [
-        {"role": "system", "content": system_prompt}
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user", 
+            "content": (
+                f"Context for this session:\n"
+                f"Task Instructions:\n{payload.taskInstructions}\n\n"
+                f"Validation Test Suite (Rules I must pass):\n{formatted_tests}\n\n"
+                f"My current code:\n{payload.userCode}\n\n"
+                f"Please help me step-by-step."
+            )
+        }
     ]
     
-    # Add historical context
-    for msg in payload.chatHistory:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.extend(payload.chatHistory)
 
-    # Add current environment status
-    messages.append({
-        "role": "user",
-        "content": (
-            f"My current code:\n{payload.userCode}\n\n"
-            f"Task specifications:\n{payload.taskInstructions}\n\n"
-            "Please evaluate my work Socratically."
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+            headers={"Authorization": f"Bearer {groq_api_key}"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "temperature": 0.2, # Lower temperature for more deterministic rule adherence
+                "messages": messages
+            },
+            timeout=30.0
         )
-    })
+    
+    if response.status_code != 200:
+        error_details = response.json().get("error", {}).get("message", "Unknown error from Groq")
+        raise HTTPException(status_code=response.status_code, detail=f"Groq API error: {error_details}")
 
-    try:
-        # Use the highly compliant, flagship 2026 reasoning model 'openai/gpt-oss-120b'
-        response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            temperature=0.3, # Keep temperature low for high rule-following accuracy
-            max_completion_tokens=350
-        )
-        
-        raw_completion = response.choices[0].message.content
-        
-        # Pass the output through our hard backend filter
-        final_safe_response = enforce_socratic_guardrail(raw_completion)
-
-        return {"guidance": final_safe_response}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference failure: {str(e)}")
-
+    data = response.json()
+    raw_content = data["choices"][0]["message"]["content"]
+    
+    # Process the raw output through the hard guardrail filter
+    final_content = enforce_socratic_guardrail(raw_content)
+    
+    return {"guidance": final_content}
+    
 # --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
