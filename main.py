@@ -115,126 +115,68 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
 async def health_check():
     return {"status": "awake"}
 
-# --- 4. REST API: SOCRATIC AI COACH ---
-# ==========================================
-# HARD BACKEND REGEX GUARDRAIL
-# ==========================================
-# --- 4. REST API: SOCRATIC AI COACH ---
+# --- UTILS ---
+def enforce_socratic_guardrail(text: str) -> str:
+    # Aggressive regex: matches any markdown code block style, case insensitive
+    code_block_regex = r"```[a-zA-Z]*[\s\S]*?```"
+    
+    if re.search(code_block_regex, text, re.IGNORECASE):
+        sanitized_text = re.sub(code_block_regex, "[Code block removed for educational purposes]", text, flags=re.IGNORECASE).strip()
+        
+        return (
+            f"{sanitized_text}\n\n"
+            "*(Coach Note: I intercepted and removed a code snippet I almost generated. "
+            "Let's stick to the logic! Tell me what you think your next step is in plain English.)*"
+        )
+    return text
+
+async def stream_reader(stream, stream_type: str, websocket: WebSocket):
+    try:
+        while True:
+            line = await stream.read(1024)
+            if not line: break
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_json({"event": "output", "stream": stream_type, "data": line.decode('utf-8', errors='replace')})
+    except asyncio.CancelledError:
+        pass
+
+# --- ROUTES ---
+
 @app.post("/api/coach")
 async def ask_coach(payload: CoachRequest):
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on the server.")
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY missing.")
 
-    # Strict Socratic instructions
     system_prompt = (
-        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n"
-        "CRITICAL MANDATE: You are strictly forbidden from writing code, fixing the user's syntax, or providing solutions.\n"
-        "Guidelines:\n"
-        "1. Analyze the user's code against the task instructions.\n"
-        "2. If there is an error, point them to the exact line or section to inspect.\n"
-        "3. Turn their question back into a targeted Socratic question that helps them spot their logical mistake."
+        "You are the Logixia AI Logic Coach. Philosophy: 'Master the logic. The syntax will follow.'\n"
+        "MANDATE: NEVER write code, fix syntax, or provide refactored snippets. Do NOT use markdown code blocks. "
+        "Force the user to explain their logic. If they provide code, analyze it conceptually for errors or optimizations without giving the answer."
     )
 
-    # Build the messages payload chronologically
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user", 
-            "content": f"Context for this session:\nTask Instructions:\n{payload.taskInstructions}\n\nMy current code:\n{payload.userCode}\n\nPlease help me step-by-step."
-        }
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.append({
+        "role": "user",
+        "content": f"Task: {payload.taskInstructions}\nTests: {json.dumps(payload.tests)}\nCode: {payload.userCode}\nHelp me step-by-step."
+    })
     
-    # Append the running chat history from the React frontend
-    messages.extend(payload.chatHistory)
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {groq_api_key}"},
-            json={
-                "model": "llama-3.3-70b-versatile", # Groq's fast, free reasoning model
-                "temperature": 0.3,
-                "messages": messages
-            },
-            timeout=30.0
-        )
-    
-    if response.status_code != 200:
-        error_details = response.json().get("error", {}).get("message", "Unknown error from Groq")
-        raise HTTPException(status_code=response.status_code, detail=f"Groq API error: {error_details}")
-
-    data = response.json()
-    return {"guidance": data["choices"][0]["message"]["content"]}
-
-async def ask_coach(payload: CoachRequest):
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on the server.")
-
-    # Socratic Tough-Love instructions with direct exposure to test assertions
-    system_prompt = (
-        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n"
-        "CRITICAL MANDATE: You are strictly forbidden from writing code, fixing the user's syntax, providing refactored snippets, or handing out direct solutions.\n"
-        "Do NOT use markdown code blocks (triple backticks) under any circumstances.\n\n"
-        "Guidelines based on user progress:\n"
-        "1. IF THE CODE IS EMPTY OR SHOWS ZERO EFFORT: Call them out on it directly! Tell them you can see they haven't even tried yet. "
-        "Refuse to give them hints or discuss the tests until they write down a plan or attempt some code. Make them do the mental heavy lifting.\n"
-        "2. IF THE USER HAS A REASONABLE ATTEMPT BUT TESTS ARE FAILING: Analyze their code specifically against the provided Test Suite specifications (inputs, expected outputs, unit test assertions). "
-        "Do not tell them the exact values that failed, but identify which test logic block/rule they are violating and point to the exact line/section in their code causing the failure.\n"
-        "3. IF THE USER'S CODE PASSES ALL TESTS: Congratulate them briefly, then pivot immediately to code quality! "
-        "Analyze their working code for structural or theoretical improvements—such as time/space complexity (Big O), readability, redundantly nested loops, or language-specific idioms (e.g., Pythonic code list comprehensions, built-in functions). "
-        "Socratically guide them to identify these refactoring opportunities themselves by asking them how they might optimize their working solution.\n"
-        "4. ALWAYS turn their explicit question back into a targeted Socratic counter-question that forces them to discover their own logical mistakes or architectural improvements."
-    )
-
-    # Format the tests into a readable JSON block for the LLM context
-    formatted_tests = json.dumps(payload.tests, indent=2)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user", 
-            "content": (
-                f"Context for this session:\n"
-                f"Task Instructions:\n{payload.taskInstructions}\n\n"
-                f"Validation Test Suite (Rules I must pass):\n{formatted_tests}\n\n"
-                f"My current code:\n{payload.userCode}\n\n"
-                f"Please help me step-by-step."
-            )
-        }
-    ]
-    
-    # Safely unpack history, passing only standard roles and content values to Groq
     for msg in payload.chatHistory:
-        role = msg.get("role")
-        content = msg.get("content")
-        if role and content:
-            messages.append({"role": str(role), "content": str(content)})
+        if "role" in msg and "content" in msg:
+            messages.append({"role": msg["role"], "content": msg["content"]})
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {groq_api_key}"},
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "temperature": 0.2,
-                "messages": messages
-            },
+            json={"model": "llama-3.3-70b-versatile", "temperature": 0.2, "messages": messages},
             timeout=30.0
         )
     
     if response.status_code != 200:
-        error_details = response.json().get("error", {}).get("message", "Unknown error from Groq")
-        raise HTTPException(status_code=response.status_code, detail=f"Groq API error: {error_details}")
+        raise HTTPException(status_code=502, detail="Groq API connection failure.")
 
-    data = response.json()
-    raw_content = data["choices"][0]["message"]["content"]
-    
-    # Pass the raw completion through the Socratic check
-    final_content = enforce_socratic_guardrail(raw_content)
-    
-    return {"guidance": final_content}
+    raw_content = response.json()["choices"][0]["message"]["content"]
+    return {"guidance": enforce_socratic_guardrail(raw_content)}
 # --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
