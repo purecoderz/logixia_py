@@ -1,3 +1,5 @@
+import httpx
+from fastapi import HTTPException
 import asyncio
 import os
 import json
@@ -23,6 +25,12 @@ class SubmitPayload(BaseModel):
     code: str
     tests: List[Dict[str, Any]]
 
+class CoachRequest(BaseModel):
+    userCode: str
+    taskInstructions: str
+    chatHistory: List[Dict[str, Any]]
+    tests: List[Dict[str, Any]]  # 👈 Added to pass the test suite payload
+    
 # --- SESSION TRACKER ---
 class ActiveSession:
     def __init__(self):
@@ -107,6 +115,63 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
 async def health_check():
     return {"status": "awake"}
 
+# --- 4. REST API: SOCRATIC AI COACH ---
+@app.post("/api/coach")
+async def ask_coach(payload: CoachRequest):
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured on the server.")
+
+    # Socratic Tough-Love instructions with direct exposure to test assertions
+    system_prompt = (
+        "You are the Logixia AI Logic Coach. Your core philosophy is: 'Master the logic. The syntax will follow.'\n"
+        "CRITICAL MANDATE: You are strictly forbidden from writing code, fixing the user's syntax, or providing solutions.\n\n"
+        "Guidelines based on user progress:\n"
+        "1. IF THE CODE IS EMPTY OR SHOWS ZERO EFFORT: Call them out on it directly! Tell them you can see they haven't even tried yet. "
+        "Refuse to give them hints or discuss the tests until they write down a plan or attempt some code. Make them do the mental heavy lifting.\n"
+        "2. IF THE USER HAS A REASONABLE ATTEMPT: Analyze their code specifically against the provided Test Suite specifications (inputs, expected outputs, unit test assertions). "
+        "Do not tell them the exact values that failed, but identify which test logic block/rule they are violating and point to the exact line/section in their code causing the failure.\n"
+        "3. ALWAYS turn their explicit question back into a targeted Socratic counter-question that forces them to discover their own logical mistakes."
+    )
+
+    # Format the tests into a readable JSON block for the LLM context
+    formatted_tests = json.dumps(payload.tests, indent=2)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user", 
+            "content": (
+                f"Context for this session:\n"
+                f"Task Instructions:\n{payload.taskInstructions}\n\n"
+                f"Validation Test Suite (Rules I must pass):\n{formatted_tests}\n\n"
+                f"My current code:\n{payload.userCode}\n\n"
+                f"Please help me step-by-step."
+            )
+        }
+    ]
+    
+    # Append the running chat history from the React frontend
+    messages.extend(payload.chatHistory)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_api_key}"},
+            json={
+                "model": "llama-3.3-70b-specdec",
+                "temperature": 0.3,
+                "messages": messages
+            },
+            timeout=30.0
+        )
+    
+    if response.status_code != 200:
+        error_details = response.json().get("error", {}).get("message", "Unknown error from Groq")
+        raise HTTPException(status_code=response.status_code, detail=f"Groq API error: {error_details}")
+
+    data = response.json()
+    return {"guidance": data["choices"][0]["message"]["content"]}
 # --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
