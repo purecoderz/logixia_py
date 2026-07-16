@@ -159,7 +159,7 @@ async def ask_coach(payload: CoachRequest):
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {groq_api_key}"},
             json={
-                "model": "llama-3.3-70b-specdec",
+                "model": "llama-3.3-70b-versatile",
                 "temperature": 0.3,
                 "messages": messages
             },
