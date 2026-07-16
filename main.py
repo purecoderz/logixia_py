@@ -115,9 +115,6 @@ async def run_interactive_code(code: str, session: ActiveSession, websocket: Web
 async def health_check():
     return {"status": "awake"}
 
-
-
-
 @app.post("/api/coach")
 async def ask_coach(payload: CoachRequest):
     groq_api_key = os.getenv("GROQ_API_KEY")
@@ -148,10 +145,10 @@ async def ask_coach(payload: CoachRequest):
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
             headers={"Authorization": f"Bearer {groq_api_key}"},
             json={
-                "model": "llama-3.3-70b-versatile", 
+                "model": "llama-3.3-70b-versatile", # Groq's fast, free reasoning model
                 "temperature": 0.3,
                 "messages": messages
             },
@@ -168,28 +165,29 @@ async def ask_coach(payload: CoachRequest):
     # =====================================================================
     # SAFELY APPLY THE GUARDRAIL TO YOUR WORKING CODE
     # =====================================================================
+    # This non-destructive regex scans only the final text block.
     code_block_pattern = r"```[a-zA-Z0-9_-]*[\s\S]*?```"
+    
     if re.search(code_block_pattern, raw_content):
-        # Strip out the code blocks completely
+        # Strip out any backtick blocks
         sanitized_content = re.sub(code_block_pattern, "", raw_content).strip()
         
         # Guard against empty text if the model ONLY generated a code block
         if not sanitized_content:
             final_content = (
-                "I was about to write out the code for you, but that would miss the point of learning! "
-                "Let's look closely at your control loops instead. What do you think your logic is missing?"
+                "I was about to write the code for you, but that would miss the point of learning! "
+                "Let's look at your control structure instead. What do you think your logic is missing?"
             )
         else:
             final_content = (
                 f"{sanitized_content}\n\n"
                 "*(Coach Note: I intercepted and removed a code snippet I almost generated. "
-                "Let's stick to the logic!)*"
+                "Let's stick to analyzing the logic!)*"
             )
     else:
         final_content = raw_content
 
     return {"guidance": final_content}
-
 # --- 2. REST API: VALIDATION SUBMISSION (FIXED) ---
 @app.post("/api/submit")
 async def submit_code_http(payload: SubmitPayload):
