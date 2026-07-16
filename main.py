@@ -145,7 +145,7 @@ async def ask_coach(payload: CoachRequest):
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+            "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {groq_api_key}"},
             json={
                 "model": "llama-3.3-70b-versatile", # Groq's fast, free reasoning model
